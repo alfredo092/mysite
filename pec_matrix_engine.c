@@ -2405,11 +2405,12 @@ static const char *bot_default_warmup_path(void) {
     return "/";
 }
 
-static bool bot_warmup_get_request(void) {
+static bool bot_warmup_get_request_to_host(const char *hostname, const char *path) {
     char warmup_payload[1024] = {0};
-    const char *path = bot_default_warmup_path();
+    const char *use_path = path ? path : bot_default_warmup_path();
+    const char *use_host = hostname ? hostname : g_target.hostname;
     char logline[256];
-    snprintf(logline, sizeof(logline), "[BOT] Warmup GET %s on %s", path, g_target.hostname);
+    snprintf(logline, sizeof(logline), "[BOT] Warmup GET %s on %s", use_path, use_host);
     push_log(logline);
     snprintf(warmup_payload, sizeof(warmup_payload),
              "GET %s HTTP/1.1\r\n"
@@ -2429,10 +2430,10 @@ static bool bot_warmup_get_request(void) {
              "Sec-CH-UA-Mobile: ?0\r\n"
              "Sec-CH-UA-Platform: \"Linux\"\r\n"
              "\r\n",
-             path,
-             g_target.hostname);
+             use_path,
+             use_host);
 
-    int fd = bot_connect_target();
+    int fd = bot_connect_host(use_host, 443);
     if (fd < 0) {
         push_log("[BOT] Warmup GET failed: connect failed");
         return false;
@@ -2447,6 +2448,10 @@ static bool bot_warmup_get_request(void) {
         push_log("[BOT] Warmup GET succeeded");
     }
     return success;
+}
+
+static bool bot_warmup_get_request(void) {
+    return bot_warmup_get_request_to_host(g_target.hostname, bot_default_warmup_path());
 }
 
 static void *bot_traffic_worker(void *arg) {
@@ -2518,7 +2523,8 @@ static bool bot_send_market_order(const char *side, float qty, const char *qty_s
     char body[512] = {0};
     char api_header[256] = {0};
     char signature_header[256] = {0};
-    const char *path = g_target.path[0] ? g_target.path : "/";
+    const char *path = "/v5/order/create";
+    const char *host_header = bot_is_bybit_target() ? "api.bybit.com" : g_target.hostname;
 
     if (g_bybit_presigned_tx[0] != '\0') {
         snprintf(tx_payload, sizeof(tx_payload), "%s", g_bybit_presigned_tx);
@@ -2552,7 +2558,7 @@ static bool bot_send_market_order(const char *side, float qty, const char *qty_s
             }
         }
         uint64_t timestamp_ms = 0;
-        int recv_window = 5000;
+        int recv_window = 20000; // explicit receive window for Bybit V5
         if (g_bot_api_secret[0] != '\0' && g_bot_api_key[0] != '\0') {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
@@ -2593,14 +2599,20 @@ static bool bot_send_market_order(const char *side, float qty, const char *qty_s
                  "Connection: close\r\n\r\n"
                  "%s",
                  path,
-                 g_target.hostname,
+                 host_header,
                  api_header,
                  signature_header,
                  strnlen(body, sizeof(body)),
                  body);
     }
 
-    int fd = bot_connect_target();
+    bool order_tls = bot_is_bybit_target() || g_target.is_https;
+    int fd;
+    if (order_tls) {
+        fd = bot_connect_host(host_header, 443);
+    } else {
+        fd = bot_connect_target();
+    }
     if (fd < 0) {
         push_log("[BOT] Failed to open order socket");
         return false;
@@ -2610,11 +2622,12 @@ static bool bot_send_market_order(const char *side, float qty, const char *qty_s
     ssize_t sent = 0;
     char respbuf[4096] = {0};
     ssize_t response_len = 0;
-    if (g_target.is_https) {
-        if (!bot_warmup_get_request()) {
+    if (order_tls) {
+        if (!bot_warmup_get_request_to_host(host_header, bot_default_warmup_path())) {
             push_log("[BOT] Warmup GET request failed");
         }
-        SSL *ssl = bot_tls_connect(fd, g_target.hostname);
+        const char *ssl_hostname = host_header;
+        SSL *ssl = bot_tls_connect(fd, ssl_hostname);
         if (!ssl) {
             push_log("[BOT] Failed to establish HTTPS order connection");
         } else {
