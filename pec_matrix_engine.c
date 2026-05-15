@@ -2540,10 +2540,6 @@ static bool bot_send_market_order(const char *side, float qty, const char *qty_s
                          state ? state->symbol : "SOLUSDT", side, qty);
             }
         }
-        if (g_bot_api_key[0] != '\0') {
-            snprintf(api_header, sizeof(api_header), "X-BAPI-API-KEY: %s\r\n", g_bot_api_key);
-        }
-
         uint64_t timestamp_ms = 0;
         int recv_window = 5000;
         if (g_bot_api_secret[0] != '\0' && g_bot_api_key[0] != '\0') {
@@ -2566,7 +2562,10 @@ static bool bot_send_market_order(const char *side, float qty, const char *qty_s
                 snprintf(hex + (i * 2), sizeof(hex) - (i * 2), "%02x", digest[i]);
             }
             snprintf(signature_header, sizeof(signature_header), "X-BAPI-SIGN: %s\r\n", hex);
-            snprintf(api_header, sizeof(api_header), "X-BAPI-API-KEY: %s\r\nX-BAPI-TIMESTAMP: %llu\r\nX-BAPI-RECV-WINDOW: %d\r\n",
+            snprintf(api_header, sizeof(api_header),
+                     "X-BAPI-API-KEY: %s\r\n"
+                     "X-BAPI-TIMESTAMP: %llu\r\n"
+                     "X-BAPI-RECV-WINDOW: %d\r\n",
                      g_bot_api_key,
                      (unsigned long long)timestamp_ms,
                      recv_window);
@@ -2576,31 +2575,13 @@ static bool bot_send_market_order(const char *side, float qty, const char *qty_s
                  "POST %s HTTP/1.1\r\n"
                  "Host: %s\r\n"
                  "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:118.0) Gecko/20100101 Firefox/118.0\r\n"
-                 "Accept: application/json, text/plain, */*\r\n"
-                 "Accept-Language: en-US,en;q=0.9\r\n"
-                 "Accept-Encoding: gzip, deflate, br\r\n"
-                 "DNT: 1\r\n"
-                 "Origin: https://%s\r\n"
-                 "Referer: https://%s/\r\n"
-                 "Sec-Fetch-Dest: empty\r\n"
-                 "Sec-Fetch-Mode: cors\r\n"
-                 "Sec-Fetch-Site: same-site\r\n"
-                 "Sec-CH-UA: \"Firefox\";v=118, \"Chromium\";v=126, \"Not A(Brand)\";v=99\r\n"
-                 "Sec-CH-UA-Mobile: ?0\r\n"
-                 "Sec-CH-UA-Platform: \"Linux\"\r\n"
                  "Content-Type: application/json\r\n"
                  "%s"
                  "%s"
                  "Content-Length: %zu\r\n"
-                 "Connection: keep-alive\r\n"
-                 "Cache-Control: no-cache\r\n"
-                 "Pragma: no-cache\r\n"
-                 "X-Requested-With: XMLHttpRequest\r\n"
-                 "\r\n"
+                 "Connection: close\r\n\r\n"
                  "%s",
                  path,
-                 g_target.hostname,
-                 g_target.hostname,
                  g_target.hostname,
                  api_header,
                  signature_header,
@@ -2662,13 +2643,20 @@ static bool bot_send_market_order(const char *side, float qty, const char *qty_s
         atomic_fetch_add(&g_bot_actions, 1);
 
         if (response_len > 0) {
-            double ret_code = 0.0;
-            if (bot_extract_json_number((uint8_t *)respbuf, (size_t)response_len, "\"retCode\"", &ret_code)) {
+            // Жесткий дебаг: печатаем сырой ответ сервера, чтобы сразу видеть 401/502/HTML и другие отклонения.
+            char raw_debug[512];
+            snprintf(raw_debug, sizeof(raw_debug), "[SERVER RESPONSE] %.*s",
+                     (int)(response_len > 300 ? 300 : response_len), respbuf);
+            push_log(raw_debug);
+
+            double ret_code = -1.0;
+            char *json_start = strchr(respbuf, '{');
+            if (json_start && bot_extract_json_number((uint8_t *)json_start, strlen(json_start), "\"retCode\"", &ret_code)) {
                 if ((int)ret_code != 0) {
                     success = false;
                     char ret_msg[128] = {0};
-                    if (!bot_extract_json_string((uint8_t *)respbuf, (size_t)response_len, "\"retMsg\"", ret_msg, sizeof(ret_msg))) {
-                        bot_extract_json_string((uint8_t *)respbuf, (size_t)response_len, "\"ret_msg\"", ret_msg, sizeof(ret_msg));
+                    if (!bot_extract_json_string((uint8_t *)json_start, strlen(json_start), "\"retMsg\"", ret_msg, sizeof(ret_msg))) {
+                        bot_extract_json_string((uint8_t *)json_start, strlen(json_start), "\"ret_msg\"", ret_msg, sizeof(ret_msg));
                     }
                     char errlog[384];
                     snprintf(errlog, sizeof(errlog), "[BOT] ORDER REJECTED retCode=%d retMsg=%s | side=%s | symbol=%s",
@@ -2688,13 +2676,13 @@ static bool bot_send_market_order(const char *side, float qty, const char *qty_s
                     char exec_qty[64] = {0};
                     char exec_price[64] = {0};
 
-                    if (bot_extract_json_number_token_string((uint8_t *)respbuf, (size_t)response_len, "\"execQty\"", exec_qty, sizeof(exec_qty))) {
+                    if (bot_extract_json_number_token_string((uint8_t *)json_start, strlen(json_start), "\"execQty\"", exec_qty, sizeof(exec_qty))) {
                         if (exec_qty[0] != '\0') {
                             safe_strncpy(state->last_trade_qty_str, exec_qty, sizeof(state->last_trade_qty_str));
                         }
                     }
 
-                    if (bot_extract_json_number_token_string((uint8_t *)respbuf, (size_t)response_len, "\"execPrice\"", exec_price, sizeof(exec_price))) {
+                    if (bot_extract_json_number_token_string((uint8_t *)json_start, strlen(json_start), "\"execPrice\"", exec_price, sizeof(exec_price))) {
                         if (exec_price[0] != '\0') {
                             char *endptr = NULL;
                             double parsed_price = strtod(exec_price, &endptr);
@@ -2781,13 +2769,14 @@ static void bot_execute_auto_snipe(const struct matrix_event *evt) {
 
             if (action == ACT_SHORT || action == ACT_SELL) {
                 side = "SELL";
-            }
-            if (action == ACT_BUY || action == ACT_COVER) {
+            } else if (action == ACT_BUY || action == ACT_COVER) {
                 side = "BUY";
             }
 
-            if (action == ACT_SELL || action == ACT_COVER) {
+            if (action == ACT_SELL) {
                 qty_str = state->last_trade_qty_str[0] ? state->last_trade_qty_str : NULL;
+            } else if (action == ACT_COVER) {
+                qty_str = NULL;
             }
         }
     }
