@@ -2532,12 +2532,23 @@ static bool bot_send_market_order(const char *side, float qty, const char *qty_s
                          state ? state->symbol : "SOLUSDT", side, qty_str);
             }
         } else {
-            if (price_limit > 0.0) {
-                snprintf(body, sizeof(body), "{\"category\":\"spot\",\"symbol\":\"%s\",\"side\":\"%s\",\"orderType\":\"Market\",\"quoteOrderQty\":\"%.2f\",\"price\":\"%.4f\"}",
-                         state ? state->symbol : "SOLUSDT", side, qty, price_limit);
+            char qty_usdt_str[32] = {0};
+            double qty_usdt = (double)qty;
+            double qty_usdt_rounded = round(qty_usdt * 100.0) / 100.0;
+            if (fabs(qty_usdt_rounded - (double)(long long)qty_usdt_rounded) < 0.000001) {
+                snprintf(qty_usdt_str, sizeof(qty_usdt_str), "%lld", (long long)qty_usdt_rounded);
             } else {
-                snprintf(body, sizeof(body), "{\"category\":\"spot\",\"symbol\":\"%s\",\"side\":\"%s\",\"orderType\":\"Market\",\"quoteOrderQty\":\"%.2f\"}",
-                         state ? state->symbol : "SOLUSDT", side, qty);
+                snprintf(qty_usdt_str, sizeof(qty_usdt_str), "%.2f", qty_usdt_rounded);
+                char *p = qty_usdt_str + strlen(qty_usdt_str) - 1;
+                while (p > qty_usdt_str && *p == '0') *p-- = '\0';
+                if (*p == '.') *p = '\0';
+            }
+            if (price_limit > 0.0) {
+                snprintf(body, sizeof(body), "{\"category\":\"spot\",\"symbol\":\"%s\",\"side\":\"%s\",\"orderType\":\"Market\",\"quoteOrderQty\":\"%s\",\"price\":\"%.4f\"}",
+                         state ? state->symbol : "SOLUSDT", side, qty_usdt_str, price_limit);
+            } else {
+                snprintf(body, sizeof(body), "{\"category\":\"spot\",\"symbol\":\"%s\",\"side\":\"%s\",\"orderType\":\"Market\",\"quoteOrderQty\":\"%s\"}",
+                         state ? state->symbol : "SOLUSDT", side, qty_usdt_str);
             }
         }
         uint64_t timestamp_ms = 0;
